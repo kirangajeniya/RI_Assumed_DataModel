@@ -1,0 +1,66 @@
+# .github/workflows/model-history.yml
+#
+# On every push to main that changes the model CSVs, generate the diff
+# report for that commit and store it under docs/model-history/ so the
+# whole team can browse the history.
+#
+# Placement: copy to .github/workflows/model-history.yml at your repo root.
+#
+# NOTE on branch protection: the default GITHUB_TOKEN cannot push to a
+# protected branch. If main is protected, either:
+#   - allow the github-actions bot to bypass pull-request requirements
+#     (repo Settings -> Rules), or
+#   - store a personal access token (classic, repo scope) as the
+#     ACTIONS_PUSH_TOKEN secret and add it to the checkout step:
+#       with:
+#         token: ${{ secrets.ACTIONS_PUSH_TOKEN }}
+
+name: Model history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'model/*.csv'
+      # docs/model-history/ is intentionally NOT listed, so the bot's own
+      # history commits never retrigger this workflow (no infinite loop).
+
+permissions:
+  contents: write  # needed to push the history files back to main
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out (current + parent commit)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pandas openpyxl
+
+      - name: Generate report for this commit
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          mkdir -p /tmp/old /tmp/new docs/model-history
+          git show 'HEAD~1:model/dictionary.csv' > /tmp/old/dictionary.csv 2>/dev/null || true
+          git show 'HEAD~1:model/relationships.csv' > /tmp/old/relationships.csv 2>/dev/null || true
+          git show 'HEAD:model/dictionary.csv' > /tmp/new/dictionary.csv
+          git show 'HEAD:model/relationships.csv' > /tmp/new/relationships.csv
+          python diff.py --old-dir /tmp/old --new-dir /tmp/new \
+            --out "docs/model-history/$SHA.md" \
+            --excel "docs/model-history/$SHA.xlsx"
+
+      - name: Commit history files back to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/model-history
+          git diff --cached --quiet || git commit -m "model history: $(git rev-parse --short HEAD)"
+          git push
