@@ -1,0 +1,113 @@
+# .github/workflows/model-diff.yml
+#
+# Posts a visual data-model diff on every pull request that touches the
+# erwin exports under model/. The report contains a Mermaid erDiagram
+# plus a Markdown change table and is posted as a single sticky PR comment
+# (updated in place on every push). If model/*.pdf exists (e.g. an erwin
+# diagram export), the comment also links it for reviewers.
+#
+# Placement: copy this file to .github/workflows/model-diff.yml at your repo
+# root, and diff.py to the repo root as well (or adjust the `python diff.py`
+# path below).
+
+name: Model diff
+
+on:
+  pull_request:
+    paths:
+      - 'model/*.csv'
+      # NOTE: model/*.pdf is intentionally NOT a trigger -- a PDF-only change
+      # is not relevant. The PDF is still linked in the comment whenever the
+      # workflow runs for CSV changes (see "Append model PDF links" below).
+
+permissions:
+  contents: read        # checkout + git show
+  pull-requests: write  # sticky PR comment
+
+jobs:
+  model-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed so origin/<base> exists for git show
+
+      - name: Retrieve base-branch model files
+        run: |
+          mkdir -p /tmp/old_model
+          BASE_REF="origin/${{ github.base_ref }}"
+          for f in model/dictionary.csv model/relationships.csv; do
+            name="$(basename "$f")"
+            if git cat-file -e "$BASE_REF:$f" 2>/dev/null; then
+              git show "$BASE_REF:$f" > "/tmp/old_model/$name"
+              echo "base $f retrieved"
+            else
+              # New file on the PR branch (or first commit): diff.py treats a
+              # missing old file as empty, so everything counts as added.
+              echo "no base version of $f -- treating as empty"
+            fi
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pandas
+
+      - name: Run model diff
+        run: |
+          python diff.py \
+            --old-dir /tmp/old_model \
+            --new-dir model \
+            --out report.md \
+            --max-chars 60000 \
+            --style emoji
+
+      - name: Append model PDF links
+        # GitHub can't diff or render a PDF inside a comment, but reviewers
+        # can open it via the blob link below (pinned to the PR head SHA).
+        run: |
+          shopt -s nullglob
+          pdfs=(model/*.pdf)
+          if [ ${#pdfs[@]} -gt 0 ]; then
+            {
+              echo ""
+              echo "### Model diagram (PDF)"
+              echo ""
+              for pdf in "${pdfs[@]}"; do
+                echo "- [$(basename "$pdf")](https://github.com/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha }}/$pdf)"
+              done
+              echo ""
+            } >> report.md
+            echo "linked ${#pdfs[@]} PDF(s) in the report"
+          else
+            echo "no model PDFs found -- skipping"
+          fi
+
+      - name: Upload full report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-diff-report
+          path: report.md
+
+      - name: Mirror report to job summary
+        # Keeps the report visible even when commenting fails (e.g. PRs from
+        # forks with a read-only token).
+        run: cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        # Fork PRs get a read-only GITHUB_TOKEN, so commenting can fail --
+        # keep the job green and rely on the job summary + artifact instead.
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: model-diff
+          # `path` reads the comment body from a file, avoiding shell quoting
+          # and ARG_MAX pain on large diffs.
+          path: report.md
+          # Default behaviour updates the single sticky comment in place.
+          # Set `recreate: true` instead if you prefer a fresh comment per push.
+          # recreate: true
