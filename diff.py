@@ -144,16 +144,47 @@ def load_csv(path, required_cols):
     """
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-    df.columns = [norm(c) for c in df.columns]
+
+    # Try UTF-8 first, then fall back to common Windows encodings
+    for enc in ("utf-8-sig", "cp1252", "latin1"):
+        try:
+            df = pd.read_csv(
+                path,
+                dtype=str,
+                keep_default_na=False,
+                encoding=enc
+            )
+            print(f"Loaded {path} using encoding: {enc}")
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        sys.exit(f"ERROR: Unable to decode {path}")
+
+    # Remove accents and non-ASCII characters
+    import unicodedata
+
+    def clean_text(val):
+        if not isinstance(val, str):
+            return val
+        return (
+            unicodedata.normalize("NFKD", val)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+
+    df.columns = [norm(clean_text(c)) for c in df.columns]
+
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         sys.exit(
             "ERROR: %s is missing expected column(s): %s\nFound columns: %s"
             % (path, missing, list(df.columns))
         )
-    for col in df.columns:  # normalise every cell up front
-        df[col] = df[col].map(norm)
+
+    for col in df.columns:
+        df[col] = df[col].map(lambda x: norm(clean_text(x)))
+
     return df
 
 
